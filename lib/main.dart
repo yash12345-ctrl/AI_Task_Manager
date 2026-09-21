@@ -1,22 +1,17 @@
 import 'package:flutter/material.dart';
 import 'package:video_player/video_player.dart';
 import 'dart:ui';
-import 'task.dart'; 
+import 'task.dart';
+import 'package:flutter_dotenv/flutter_dotenv.dart'; 
 
 
-import 'package:firebase_core/firebase_core.dart';
-
-import 'firebase_options.dart'; 
+ 
 
 
 void main() async {
-  
   WidgetsFlutterBinding.ensureInitialized();
-  
-  
-  await Firebase.initializeApp(
-    options: DefaultFirebaseOptions.currentPlatform,
-  );
+  await dotenv.load(fileName: ".env");
+
 
   runApp(const TaskManagerApp());
 }
@@ -127,11 +122,13 @@ class _FrontPageState extends State<FrontPage> {
                         borderRadius: BorderRadius.circular(30)),
                     elevation: 8,
                   ),
-                  onPressed: () {
-                    Navigator.push(
+                  onPressed: () async {
+                    _videoController.pause();
+                    await Navigator.push(
                       context,
                       MaterialPageRoute(builder: (_) => const TaskPage()), 
                     );
+                    _videoController.play();
                   },
                   child: const Text(
                     "Start",

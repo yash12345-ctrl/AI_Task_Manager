@@ -5,11 +5,71 @@ import 'dart:convert';
 import 'package:http/http.dart' as http;
 import 'package:flutter_markdown/flutter_markdown.dart';
 import 'package:table_calendar/table_calendar.dart';
-import 'package:cloud_firestore/cloud_firestore.dart';
+import 'package:shared_preferences/shared_preferences.dart';
+import 'package:uuid/uuid.dart';
+import 'widgets/top_bar.dart';
+import 'widgets/bottom_bar.dart';
+import 'add_task/add_task.dart';
+import 'ai_task_analysis/ai_insights_card.dart';
+import 'ai_task_analysis/ai_calendar.dart';
+import 'package:flutter_dotenv/flutter_dotenv.dart';
 
 
-const String GEMINI_API_KEY = "AIzaSyAPedjxWZPnu8qV4TqQJFtIYwiRR5CrQUc";
+class Subtask {
+  final String id;
+  String title;
+  bool isCompleted;
 
+  Subtask({
+    required this.id,
+    required this.title,
+    this.isCompleted = false,
+  });
+
+  factory Subtask.fromJson(Map<String, dynamic> json) {
+    return Subtask(
+      id: json['id'] as String,
+      title: json['title'] as String? ?? '',
+      isCompleted: json['isCompleted'] as bool? ?? false,
+    );
+  }
+
+  Map<String, dynamic> toJson() {
+    return {
+      'id': id,
+      'title': title,
+      'isCompleted': isCompleted,
+    };
+  }
+}
+
+class Project {
+  final String id;
+  String name;
+  String? parentId; // For nested projects
+
+  Project({
+    required this.id,
+    required this.name,
+    this.parentId,
+  });
+
+  factory Project.fromJson(Map<String, dynamic> json) {
+    return Project(
+      id: json['id'] as String,
+      name: json['name'] as String? ?? '',
+      parentId: json['parentId'] as String?,
+    );
+  }
+
+  Map<String, dynamic> toJson() {
+    return {
+      'id': id,
+      'name': name,
+      'parentId': parentId,
+    };
+  }
+}
 
 class Task {
   final String id;
@@ -18,6 +78,11 @@ class Task {
   final String priority;
   final String category;
   bool isCompleted;
+  
+  String? projectId;
+  List<String> tags;
+  List<Subtask> subtasks;
+  int orderIndex;
 
   Task({
     required this.id,
@@ -26,18 +91,53 @@ class Task {
     required this.priority,
     required this.category,
     this.isCompleted = false,
+    this.projectId,
+    this.tags = const [],
+    this.subtasks = const [],
+    this.orderIndex = 0,
   });
 
-  factory Task.fromFirestore(DocumentSnapshot doc) {
-    Map data = doc.data() as Map<String, dynamic>;
+  factory Task.fromJson(Map<String, dynamic> json) {
     return Task(
-      id: doc.id,
-      title: data['title'] ?? '',
-      dueDate: (data['dueDate'] as Timestamp).toDate(),
-      priority: data['priority'] ?? 'Medium',
-      category: data['category'] ?? 'Work',
-      isCompleted: data['isCompleted'] ?? false,
+      id: json['id'] as String,
+      title: json['title'] as String? ?? '',
+      dueDate: DateTime.parse(json['dueDate'] as String),
+      priority: _mapOldPriority(json['priority'] as String? ?? 'Medium'),
+      category: json['category'] as String? ?? 'Work',
+      isCompleted: json['isCompleted'] as bool? ?? false,
+      projectId: json['projectId'] as String?,
+      tags: (json['tags'] as List<dynamic>?)?.map((e) => e.toString()).toList() ?? [],
+      subtasks: (json['subtasks'] as List<dynamic>?)?.map((e) => Subtask.fromJson(e)).toList() ?? [],
+      orderIndex: json['orderIndex'] as int? ?? 0,
     );
+  }
+
+  static String _mapOldPriority(String oldPriority) {
+    switch (oldPriority.toLowerCase()) {
+      case 'high': return 'P1';
+      case 'medium': return 'P2';
+      case 'low': return 'P3';
+      case 'p1': return 'P1';
+      case 'p2': return 'P2';
+      case 'p3': return 'P3';
+      case 'p4': return 'P4';
+      default: return 'P4';
+    }
+  }
+
+  Map<String, dynamic> toJson() {
+    return {
+      'id': id,
+      'title': title,
+      'dueDate': dueDate.toIso8601String(),
+      'priority': priority,
+      'category': category,
+      'isCompleted': isCompleted,
+      'projectId': projectId,
+      'tags': tags,
+      'subtasks': subtasks.map((e) => e.toJson()).toList(),
+      'orderIndex': orderIndex,
+    };
   }
 }
 
@@ -49,19 +149,9 @@ class TaskPage extends StatefulWidget {
 }
 
 class _TaskPageState extends State<TaskPage> {
-  final CollectionReference _tasksCollection =
-      FirebaseFirestore.instance.collection('tasks');
-
-  late StreamSubscription _tasksSubscription;
   bool _isPageLoading = true;
   List<Task> _allTasks = [];
-
-  final _formKey = GlobalKey<FormState>();
-  String _title = '';
-  DateTime _dueDate = DateTime.now();
-  String _priority = 'Medium';
-  String _category = 'Work';
-
+  List<Project> _allProjects = [];
   String _sortBy = 'DueDate';
   String _filterPriority = 'All';
   String _filterCategory = 'All';
@@ -76,30 +166,51 @@ class _TaskPageState extends State<TaskPage> {
   void initState() {
     super.initState();
     _selectedDay = _focusedDay;
+    _loadData();
+  }
 
-    _tasksSubscription = _tasksCollection.snapshots().listen((snapshot) {
-      final tasks =
-          snapshot.docs.map((doc) => Task.fromFirestore(doc)).toList();
+  Future<void> _loadData() async {
+    try {
+      final prefs = await SharedPreferences.getInstance();
+      
+      final String? projectsJson = prefs.getString('projects');
+      if (projectsJson != null) {
+        final List<dynamic> decodedProjects = jsonDecode(projectsJson);
+        _allProjects = decodedProjects.map((e) => Project.fromJson(e as Map<String, dynamic>)).toList();
+      }
+
+      final String? tasksJson = prefs.getString('tasks');
+      if (tasksJson != null) {
+        final List<dynamic> decoded = jsonDecode(tasksJson);
+        _allTasks = decoded.map((e) => Task.fromJson(e as Map<String, dynamic>)).toList();
+      }
+    } catch (e) {
+      print("Error loading data: $e");
+    } finally {
       if (mounted) {
         setState(() {
-          _allTasks = tasks;
           _isPageLoading = false;
         });
-        _fetchAISuggestions(tasks); 
+        _fetchAISuggestions(_allTasks);
       }
-    }, onError: (error) {
-      if (mounted) {
-        setState(() {
-          _isPageLoading = false;
-        });
-        print("Error listening to tasks: $error");
-      }
-    });
+    }
+  }
+
+  Future<void> _saveData() async {
+    try {
+      final prefs = await SharedPreferences.getInstance();
+      final String tasksJson = jsonEncode(_allTasks.map((t) => t.toJson()).toList());
+      await prefs.setString('tasks', tasksJson);
+      
+      final String projectsJson = jsonEncode(_allProjects.map((p) => p.toJson()).toList());
+      await prefs.setString('projects', projectsJson);
+    } catch (e) {
+      print("Error saving data: $e");
+    }
   }
 
   @override
   void dispose() {
-    _tasksSubscription.cancel();
     super.dispose();
   }
 
@@ -129,20 +240,18 @@ class _TaskPageState extends State<TaskPage> {
           .toList();
       final response = await http.post(
         Uri.parse(
-          "https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash-latest:generateContent?key=$GEMINI_API_KEY",
+          "https://api.groq.com/openai/v1/chat/completions",
         ),
         headers: {
+          "Authorization": "Bearer ${dotenv.env['GROQ_API_KEY']}",
           "Content-Type": "application/json",
         },
         body: jsonEncode({
-          "contents": [
+          "model": "gpt-oss-20b",
+          "messages": [
             {
-              "parts": [
-                {
-                  "text":
-                      "You are a smart task assistant. Based on these tasks: $taskData\nGive 3 useful suggestions."
-                }
-              ]
+              "role": "user",
+              "content": "You are a smart task assistant. Based on these tasks: $taskData\nGive 3 useful suggestions."
             }
           ]
         }),
@@ -152,7 +261,7 @@ class _TaskPageState extends State<TaskPage> {
           final data = jsonDecode(response.body);
 
         
-          final aiText = data['candidates']?[0]?['content']?['parts']?[0]?['text'] ?? "No suggestions.";
+          final aiText = data['choices']?[0]?['message']?['content'] ?? "No suggestions.";
 
           setState(() {
             _aiSuggestions =
@@ -181,352 +290,56 @@ class _TaskPageState extends State<TaskPage> {
     }
   }
 
-  void _addTask() async {
-    if (_formKey.currentState!.validate()) {
-      _formKey.currentState!.save();
-      await _tasksCollection.add({
-        'title': _title,
-        'dueDate': Timestamp.fromDate(_dueDate),
-        'priority': _priority,
-        'category': _category,
-        'isCompleted': false,
-        'createdAt': FieldValue.serverTimestamp(),
-      });
-      Navigator.pop(context);
-    }
-  }
-
   void _toggleTaskCompletion(Task task) async {
-    await _tasksCollection.doc(task.id).update({
-      'isCompleted': !task.isCompleted,
+    setState(() {
+      task.isCompleted = !task.isCompleted;
     });
+    await _saveData();
+    _fetchAISuggestions(_allTasks);
   }
 
   void _deleteTask(Task task) async {
-    await _tasksCollection.doc(task.id).delete();
+    setState(() {
+      _allTasks.removeWhere((t) => t.id == task.id);
+    });
+    await _saveData();
+    _fetchAISuggestions(_allTasks);
   }
 
   void _showAddTaskDialog() {
-    _title = '';
-    _dueDate = DateTime.now();
-    _priority = 'Medium';
-    _category = 'Work';
-    showModalBottomSheet(
-      context: context,
-      isScrollControlled: true,
-      backgroundColor: Colors.transparent,
-      builder: (context) {
-        return LayoutBuilder(
-          builder: (context, constraints) {
-            return DraggableScrollableSheet(
-              initialChildSize: 0.85,
-              maxChildSize: 0.95,
-              minChildSize: 0.6,
-              builder: (_, controller) => Container(
-                padding: EdgeInsets.symmetric(
-                  horizontal: constraints.maxWidth < 500 ? 20 : 40,
-                  vertical: constraints.maxHeight < 700 ? 20 : 35,
-                ),
-                decoration: const BoxDecoration(
-                  color: Colors.white,
-                  borderRadius: BorderRadius.vertical(top: Radius.circular(25)),
-                  boxShadow: [
-                    BoxShadow(
-                      blurRadius: 20,
-                      color: Colors.black26,
-                      offset: Offset(0, -5),
-                    ),
-                  ],
-                ),
-                child: SingleChildScrollView(
-                  controller: controller,
-                  child: Form(
-                    key: _formKey,
-                    child: Column(
-                      children: [
-                        Container(
-                          height: 5,
-                          width: 40,
-                          margin: const EdgeInsets.only(bottom: 20),
-                          decoration: BoxDecoration(
-                            color: Colors.grey,
-                            borderRadius: BorderRadius.circular(10),
-                          ),
-                        ),
-                        const Text(
-                          "Add New Task",
-                          style: TextStyle(
-                              fontSize: 22,
-                              fontWeight: FontWeight.bold,
-                              color: Colors.blue),
-                        ),
-                        const SizedBox(height: 20),
-                        TextFormField(
-                          decoration: InputDecoration(
-                            labelText: "Task Title",
-                            prefixIcon: const Icon(Icons.title, color: Colors.blue),
-                            border: OutlineInputBorder(
-                              borderRadius: BorderRadius.circular(12),
-                            ),
-                          ),
-                          validator: (val) => val == null || val.isEmpty ? "Enter a task title" : null,
-                          onSaved: (val) => _title = val!,
-                        ),
-                        const SizedBox(height: 15),
-                        StatefulBuilder(
-                          builder: (context, setModalState) {
-                            return ListTile(
-                              contentPadding: EdgeInsets.zero,
-                              title: const Text("Due Date"),
-                              subtitle: Text(DateFormat.yMMMd().format(_dueDate)),
-                              trailing: const Icon(Icons.calendar_today, color: Colors.blue),
-                              onTap: () async {
-                                final picked = await showDatePicker(
-                                  context: context,
-                                  initialDate: _dueDate,
-                                  firstDate: DateTime.now(),
-                                  lastDate: DateTime(2100),
-                                );
-                                if (picked != null && picked != _dueDate) {
-                                  setModalState(() {
-                                    _dueDate = picked;
-                                  });
-                                }
-                              },
-                            );
-                          },
-                        ),
-                        const SizedBox(height: 15),
-                        DropdownButtonFormField<String>(
-                          value: _priority,
-                          decoration: InputDecoration(
-                            labelText: "Priority",
-                            border: OutlineInputBorder(
-                              borderRadius: BorderRadius.circular(12),
-                            ),
-                            prefixIcon: const Icon(Icons.flag, color: Colors.orange),
-                          ),
-                          items: ["High", "Medium", "Low"]
-                              .map((e) => DropdownMenuItem(value: e, child: Text(e)))
-                              .toList(),
-                          onChanged: (val) => _priority = val!,
-                        ),
-                        const SizedBox(height: 15),
-                        DropdownButtonFormField<String>(
-                          value: _category,
-                          decoration: InputDecoration(
-                            labelText: "Category",
-                            border: OutlineInputBorder(
-                              borderRadius: BorderRadius.circular(12),
-                            ),
-                            prefixIcon: const Icon(Icons.category, color: Colors.green),
-                          ),
-                          items: ["Work", "Personal", "Study"]
-                              .map((e) => DropdownMenuItem(value: e, child: Text(e)))
-                              .toList(),
-                          onChanged: (val) => _category = val!,
-                        ),
-                        const SizedBox(height: 25),
-                        SizedBox(
-                          width: double.infinity,
-                          child: ElevatedButton(
-                            style: ElevatedButton.styleFrom(
-                              minimumSize: Size(double.infinity, constraints.maxHeight < 700 ? 45 : 55),
-                              shape: RoundedRectangleBorder(
-                                  borderRadius: BorderRadius.circular(14)),
-                              backgroundColor: Colors.blue,
-                              elevation: 5,
-                            ),
-                            onPressed: _addTask,
-                            child: const Text(
-                              "Add Task",
-                              style: TextStyle(
-                                  fontSize: 18, fontWeight: FontWeight.bold),
-                            ),
-                          ),
-                        ),
-                      ],
-                    ),
-                  ),
-                ),
-              ),
-            );
-          },
-        );
+    showAddTaskBottomSheet(
+      context,
+      _allProjects,
+      (Task newTask) async {
+        newTask.orderIndex = _allTasks.length;
+        setState(() {
+          _allTasks.add(newTask);
+        });
+        await _saveData();
+        _fetchAISuggestions(_allTasks);
+      },
+      (Project newProject) async {
+        setState(() {
+          _allProjects.add(newProject);
+        });
+        await _saveData();
       },
     );
   }
 
   void _showAICalendar(List<Task> allTasks) {
-    showDialog(
-      context: context,
-      builder: (context) {
-        return LayoutBuilder(
-          builder: (context, constraints) {
-            return StatefulBuilder(builder: (context, setDialogState) {
-              List<Task> getTasksForDay(DateTime day) {
-                return allTasks
-                    .where((task) => isSameDay(task.dueDate, day))
-                    .toList();
-              }
-
-              final List<Task> selectedTasks =
-                  _selectedDay == null ? [] : getTasksForDay(_selectedDay!);
-
-              String generateDailySummary(List<Task> tasks, DateTime selectedDay) {
-                if (tasks.isEmpty) {
-                  return "A clear day! Perfect for planning ahead. 🧘";
-                }
-                final now = DateTime.now();
-                final today = DateTime(now.year, now.month, now.day);
-                final selected = DateTime(selectedDay.year, selectedDay.month, selectedDay.day);
-                final daysUntilDue = selected.difference(today).inDays;
-
-                tasks.sort((a, b) {
-                  final priorityMap = {'High': 1, 'Medium': 2, 'Low': 3};
-                  return priorityMap[a.priority]!.compareTo(priorityMap[b.priority]!);
-                });
-                final mostUrgentTask = tasks.first;
-                if (daysUntilDue == 0) {
-                  return "Due Today: Focus on '${mostUrgentTask.title}' (${mostUrgentTask.priority} priority).";
-                }
-                if (daysUntilDue == 1) {
-                  return "Due Tomorrow: Prepare for '${mostUrgentTask.title}'. ⏰";
-                }
-                if (daysUntilDue > 1) {
-                  return "Due in $daysUntilDue days: Plan for '${mostUrgentTask.title}'.";
-                }
-                if (daysUntilDue < 0) {
-                  return "Overdue: ${tasks.length} task(s) were due on this day.";
-                }
-                return "You have ${tasks.length} task(s) on the agenda.";
-              }
-
-              return Dialog(
-                shape: RoundedRectangleBorder(
-                  borderRadius: BorderRadius.circular(20),
-                ),
-                child: Container(
-                  width: constraints.maxWidth < 500 ? double.infinity : 450,
-                  padding: EdgeInsets.symmetric(
-                    horizontal: constraints.maxWidth < 500 ? 10 : 24,
-                    vertical: constraints.maxHeight < 700 ? 10 : 20,
-                  ),
-                  child: Column(
-                    mainAxisSize: MainAxisSize.min,
-                    children: [
-                      Text(
-                        "AI Task Calendar 🗓️",
-                        style: Theme.of(context).textTheme.headlineSmall?.copyWith(
-                              fontWeight: FontWeight.bold,
-                              color: Colors.blue,
-                            ),
-                      ),
-                      const SizedBox(height: 16),
-                      TableCalendar<Task>(
-                        firstDay: DateTime.utc(2020, 1, 1),
-                        lastDay: DateTime.utc(2100, 12, 31),
-                        focusedDay: _focusedDay,
-                        selectedDayPredicate: (day) => isSameDay(_selectedDay, day),
-                        eventLoader: getTasksForDay,
-                        onDaySelected: (selectedDay, focusedDay) {
-                          setDialogState(() {
-                            _selectedDay = selectedDay;
-                            _focusedDay = focusedDay;
-                          });
-                        },
-                        calendarStyle: CalendarStyle(
-                          todayDecoration: BoxDecoration(
-                            color: Colors.blue.shade200,
-                            shape: BoxShape.circle,
-                          ),
-                          selectedDecoration: const BoxDecoration(
-                            color: Colors.blue,
-                            shape: BoxShape.circle,
-                          ),
-                          markerDecoration: const BoxDecoration(
-                            color: Colors.orange,
-                            shape: BoxShape.circle,
-                          ),
-                        ),
-                        headerStyle: const HeaderStyle(
-                          formatButtonVisible: false,
-                          titleCentered: true,
-                          titleTextStyle: TextStyle(
-                            fontSize: 18,
-                            fontWeight: FontWeight.bold,
-                          ),
-                        ),
-                      ),
-                      const SizedBox(height: 16),
-                      Container(
-                        padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
-                        decoration: BoxDecoration(
-                          color: Colors.blue.withOpacity(0.1),
-                          borderRadius: BorderRadius.circular(12),
-                        ),
-                        child: Row(
-                          children: [
-                            const Icon(Icons.insights, color: Colors.blue, size: 20),
-                            const SizedBox(width: 8),
-                            Expanded(
-                              child: Text(
-                                generateDailySummary(selectedTasks, _selectedDay ?? DateTime.now()),
-                                style: const TextStyle(
-                                    color: Colors.blue, fontWeight: FontWeight.w600),
-                              ),
-                            ),
-                          ],
-                        ),
-                      ),
-                      const Divider(height: 24),
-                      Expanded(
-                        child: selectedTasks.isEmpty
-                            ? const Center(
-                                child: Text(
-                                  "No tasks for this day.",
-                                  style: TextStyle(color: Colors.grey),
-                                ),
-                              )
-                            : ListView.builder(
-                                itemCount: selectedTasks.length,
-                                itemBuilder: (context, index) {
-                                  final task = selectedTasks[index];
-                                  return Card(
-                                    color: _priorityColor(task.priority).withOpacity(0.1),
-                                    elevation: 0,
-                                    margin: const EdgeInsets.symmetric(vertical: 4),
-                                    child: ListTile(
-                                      title: Text(task.title,
-                                          style: const TextStyle(
-                                              fontWeight: FontWeight.bold)),
-                                      leading: Icon(
-                                        Icons.circle,
-                                        color: _priorityColor(task.priority),
-                                        size: 12,
-                                      ),
-                                    ),
-                                  );
-                                },
-                              ),
-                      ),
-                    ],
-                  ),
-                ),
-              );
-            });
-          },
-        );
-      },
-    );
+    showPremiumAICalendar(context, allTasks);
   }
 
   Color _priorityColor(String priority) {
     switch (priority) {
-      case "High":
+      case "P1":
         return Colors.red;
-      case "Medium":
+      case "P2":
         return Colors.orange;
+      case "P3":
+        return Colors.blue;
+      case "P4":
       default:
         return Colors.green;
     }
@@ -544,19 +357,50 @@ class _TaskPageState extends State<TaskPage> {
       return true;
     }).toList();
 
-    final priorityMap = {'High': 1, 'Medium': 2, 'Low': 3};
     filteredTasks.sort((a, b) {
       switch (_sortBy) {
         case 'Priority':
-          return priorityMap[a.priority]!.compareTo(priorityMap[b.priority]!);
+          return a.priority.compareTo(b.priority); // P1 < P2 < P3 < P4
         case 'Title':
           return a.title.compareTo(b.title);
+        case 'Custom':
+          return a.orderIndex.compareTo(b.orderIndex);
         case 'DueDate':
         default:
           return a.dueDate.compareTo(b.dueDate);
       }
     });
     return filteredTasks;
+  }
+
+  Widget _buildActiveTasks(List<Task> activeTasks, bool isWide) {
+    if (_sortBy != 'Custom') {
+      return Column(
+        children: activeTasks.map((task) => _buildTaskTile(task, isWide: isWide)).toList(),
+      );
+    }
+    return ReorderableListView(
+      shrinkWrap: true,
+      physics: const NeverScrollableScrollPhysics(),
+      onReorder: (oldIndex, newIndex) async {
+        if (newIndex > oldIndex) newIndex -= 1;
+        final Task item = activeTasks.removeAt(oldIndex);
+        activeTasks.insert(newIndex, item);
+        
+        for (int i = 0; i < activeTasks.length; i++) {
+          activeTasks[i].orderIndex = i;
+        }
+        
+        setState(() {});
+        await _saveData();
+      },
+      children: activeTasks.map((task) {
+        return Container(
+          key: ValueKey(task.id),
+          child: _buildTaskTile(task, isWide: isWide),
+        );
+      }).toList(),
+    );
   }
 
   @override
@@ -574,136 +418,121 @@ class _TaskPageState extends State<TaskPage> {
     final completedTasks = _getProcessedTasks(_allTasks, true);
 
     return Scaffold(
-      backgroundColor: const Color(0xFFF5F7FB),
-      appBar: AppBar(
-        title: const Text(
-          "My Tasks",
-          style: TextStyle(fontWeight: FontWeight.bold),
-        ),
-        centerTitle: true,
-        elevation: 0,
-        backgroundColor: Colors.blue,
-        actions: [
-          IconButton(
-            onPressed: () => _showAICalendar(_allTasks),
-            icon: const Icon(Icons.calendar_month_outlined),
-            tooltip: "AI Calendar",
-          ),
-        ],
+      backgroundColor: const Color(0xFFF4F7FC), // premium light gray/blue
+      extendBody: true,
+      appBar: PremiumTopBar(
+        title: "My Tasks",
+        onCalendarPressed: () => _showAICalendar(_allTasks),
+      ),
+      bottomNavigationBar: PremiumBottomBar(
+        onAddPressed: _showAddTaskDialog,
       ),
       body: LayoutBuilder(
         builder: (context, constraints) => SingleChildScrollView(
-          child: Padding(
-            padding: EdgeInsets.fromLTRB(
-              horizontalPadding,
-              16,
-              horizontalPadding,
-              0,
-            ),
-            child: Column(
-              children: [
-                Card(
-                  elevation: 5,
-                  shape: RoundedRectangleBorder(
-                      borderRadius: BorderRadius.circular(16)),
-                  child: Padding(
-                    padding: const EdgeInsets.all(16),
-                    child: _isLoadingAI
-                        ? const Center(child: CircularProgressIndicator(color: Colors.blue))
-                        : Column(
-                            crossAxisAlignment: CrossAxisAlignment.start,
-                            children: [
-                              const Text(
-                                "AI Suggestions 💡",
-                                style: TextStyle(
-                                    fontSize: 18,
-                                    fontWeight: FontWeight.bold,
-                                    color: Colors.blue),
-                              ),
-                              const SizedBox(height: 12),
-                              ..._aiSuggestions.map((s) => Padding(
-                                    padding: const EdgeInsets.only(bottom: 8),
-                                    child: Row(
-                                      children: [
-                                        const Icon(Icons.bolt, color: Colors.orange, size: 20),
-                                        const SizedBox(width: 8),
-                                        Expanded(child: Text(s)),
-                                      ],
-                                    ),
-                                  )),
-                            ],
-                          ),
-                  ),
-                ),
-                const SizedBox(height: 16),
-                Card(
-                  elevation: 2,
-                  shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
-                  child: Padding(
-                    padding: const EdgeInsets.symmetric(horizontal: 16.0, vertical: 8.0),
-                    child: Row(
-                      mainAxisAlignment: MainAxisAlignment.spaceBetween,
-                      children: [
-                        const Text("Sort By:", style: TextStyle(fontWeight: FontWeight.bold)),
-                        DropdownButton<String>(
-                          value: _sortBy,
-                          underline: Container(),
-                          items: ['DueDate', 'Priority', 'Title']
-                              .map((e) => DropdownMenuItem(value: e, child: Text(e)))
-                              .toList(),
-                          onChanged: (val) {
-                            if (val != null) setState(() => _sortBy = val);
-                          },
+          padding: EdgeInsets.only(
+            left: horizontalPadding,
+            right: horizontalPadding,
+            top: 16,
+            bottom: 120, // Padding for floating bottom bar
+          ),
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              // Premium AI Suggestions Card
+              AiInsightsCard(isLoading: _isLoadingAI, suggestions: _aiSuggestions),
+              const SizedBox(height: 24),
+
+
+              // Sleek Sorting Chips
+              SingleChildScrollView(
+                scrollDirection: Axis.horizontal,
+                child: Row(
+                  children: ['DueDate', 'Priority', 'Title', 'Custom'].map((sortOption) {
+                    final isSelected = _sortBy == sortOption;
+                    return Padding(
+                      padding: const EdgeInsets.only(right: 10),
+                      child: ChoiceChip(
+                        label: Text(sortOption),
+                        selected: isSelected,
+                        onSelected: (selected) {
+                          if (selected) setState(() => _sortBy = sortOption);
+                        },
+                        selectedColor: Colors.black87,
+                        backgroundColor: Colors.white,
+                        labelStyle: TextStyle(
+                          color: isSelected ? Colors.white : Colors.black87,
+                          fontWeight: FontWeight.w600,
                         ),
-                      ],
+                        shape: RoundedRectangleBorder(
+                          borderRadius: BorderRadius.circular(20),
+                          side: BorderSide(
+                            color: isSelected ? Colors.transparent : Colors.grey.shade300,
+                          ),
+                        ),
+                      ),
+                    );
+                  }).toList(),
+                ),
+              ),
+              const SizedBox(height: 20),
+
+              // Task List
+              if (activeTasks.isEmpty && completedTasks.isEmpty)
+                const Padding(
+                  padding: EdgeInsets.all(40),
+                  child: Center(
+                    child: Text(
+                      "Your day looks clear.\nTap the + to add a task!",
+                      textAlign: TextAlign.center,
+                      style: TextStyle(
+                          fontSize: 16,
+                          color: Colors.black45,
+                          fontWeight: FontWeight.w500,
+                          height: 1.5),
                     ),
                   ),
-                ),
-                const SizedBox(height: 10),
-                if (activeTasks.isEmpty && completedTasks.isEmpty)
-                  const Padding(
-                    padding: EdgeInsets.all(40),
-                    child: Center(
-                      child: Text(
-                        "No tasks yet.\nTap + to add one!",
-                        textAlign: TextAlign.center,
-                        style: TextStyle(
-                            fontSize: 18,
-                            color: Colors.black45,
-                            fontWeight: FontWeight.w500),
-                      ),
-                    ),
-                  )
-                else ...[
-                  ...activeTasks.map((task) => _buildTaskTile(task, isWide: isWide)),
-                  if (completedTasks.isNotEmpty)
-                    ExpansionTile(
+                )
+              else ...[
+                _buildActiveTasks(activeTasks, isWide),
+                if (completedTasks.isNotEmpty)
+                  Theme(
+                    data: Theme.of(context).copyWith(dividerColor: Colors.transparent),
+                    child: ExpansionTile(
                       initiallyExpanded: true,
+                      tilePadding: EdgeInsets.zero,
                       title: const Text(
-                        "Completed Tasks",
+                        "Completed",
                         style: TextStyle(
-                            fontWeight: FontWeight.bold, color: Colors.green),
+                          fontWeight: FontWeight.w800,
+                          color: Colors.black45,
+                          fontSize: 18,
+                        ),
                       ),
-                      leading: const Icon(Icons.check_circle, color: Colors.green),
                       children: completedTasks.map((task) => _buildTaskTile(task, isWide: isWide)).toList(),
                     ),
-                ],
+                  ),
               ],
-            ),
+            ],
           ),
         ),
-      ),
-      floatingActionButton: FloatingActionButton.extended(
-        onPressed: _showAddTaskDialog,
-        label: const Text("Add Task"),
-        icon: const Icon(Icons.add),
-        backgroundColor: Colors.blue,
-        elevation: 6,
       ),
     );
   }
 
   Widget _buildTaskTile(Task task, {required bool isWide}) {
+    int completedSubtasks = task.subtasks.where((s) => s.isCompleted).length;
+    int totalSubtasks = task.subtasks.length;
+    double progress = totalSubtasks == 0 ? 0 : completedSubtasks / totalSubtasks;
+
+    String? projectName;
+    if (task.projectId != null) {
+      final project = _allProjects.firstWhere(
+        (p) => p.id == task.projectId,
+        orElse: () => Project(id: '', name: ''),
+      );
+      if (project.id.isNotEmpty) projectName = project.name;
+    }
+
     return Dismissible(
       key: Key(task.id),
       direction: DismissDirection.endToStart,
@@ -770,7 +599,32 @@ class _TaskPageState extends State<TaskPage> {
                   style: TextStyle(
                       color: task.isCompleted ? Colors.grey : Colors.black54),
                 ),
-                const SizedBox(height: 6),
+                if (totalSubtasks > 0) ...[
+                  const SizedBox(height: 8),
+                  Row(
+                    children: [
+                      Expanded(
+                        child: LinearProgressIndicator(
+                          value: progress,
+                          backgroundColor: Colors.grey.shade200,
+                          valueColor: AlwaysStoppedAnimation<Color>(task.isCompleted ? Colors.grey : Colors.blueAccent),
+                          borderRadius: BorderRadius.circular(4),
+                          minHeight: 6,
+                        ),
+                      ),
+                      const SizedBox(width: 8),
+                      Text(
+                        "$completedSubtasks/$totalSubtasks",
+                        style: TextStyle(
+                          fontSize: 12,
+                          fontWeight: FontWeight.bold,
+                          color: task.isCompleted ? Colors.grey : Colors.blueAccent,
+                        ),
+                      ),
+                    ],
+                  ),
+                ],
+                const SizedBox(height: 10),
                 Wrap(
                   spacing: isWide ? 10 : 6,
                   runSpacing: 6,
@@ -784,12 +638,19 @@ class _TaskPageState extends State<TaskPage> {
                         fontSize: isWide ? 15 : 13,
                       ),
                     ),
-                    Chip(
-                      label: Text(task.category),
-                      backgroundColor: Colors.blue.withOpacity(0.1),
-                      labelStyle: TextStyle(
-                          color: Colors.blue, fontWeight: FontWeight.bold, fontSize: isWide ? 15 : 13),
-                    ),
+                    if (projectName != null)
+                      Chip(
+                        label: Text(projectName),
+                        backgroundColor: Colors.purple.withOpacity(0.1),
+                        labelStyle: TextStyle(
+                            color: Colors.purple, fontWeight: FontWeight.bold, fontSize: isWide ? 15 : 13),
+                      ),
+                    ...task.tags.map((tag) => Chip(
+                          label: Text(tag),
+                          backgroundColor: Colors.grey.withOpacity(0.15),
+                          labelStyle: TextStyle(
+                              color: Colors.grey.shade800, fontWeight: FontWeight.w600, fontSize: isWide ? 15 : 13),
+                        )),
                     OutlinedButton.icon(
                       onPressed: () {
                         Navigator.push(
@@ -874,16 +735,16 @@ class _TaskAnalysisPageState extends State<TaskAnalysisPage> {
     try {
       final res = await http.post(
         Uri.parse(
-          "https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash-latest:generateContent?key=$GEMINI_API_KEY",
+          "https://api.groq.com/openai/v1/chat/completions",
         ),
-        headers: {"Content-Type": "application/json"},
+        headers: {
+          "Authorization": "Bearer ${dotenv.env['GROQ_API_KEY']}",
+          "Content-Type": "application/json"
+        },
         body: jsonEncode({
-          "contents": [
-            {
-              "parts": [
-                {"text": intro}
-              ]
-            }
+          "model": "gpt-oss-20b",
+          "messages": [
+            {"role": "user", "content": intro}
           ]
         }),
       );
@@ -891,7 +752,7 @@ class _TaskAnalysisPageState extends State<TaskAnalysisPage> {
       if (res.statusCode == 200) {
         final data = jsonDecode(res.body);
 
-        final text = data['candidates']?[0]?['content']?['parts']?[0]?['text'] ?? "No plan generated.";
+        final text = data['choices']?[0]?['message']?['content'] ?? "No plan generated.";
 
         setState(() {
           _planText = text.toString().trim();
@@ -927,45 +788,37 @@ class _TaskAnalysisPageState extends State<TaskAnalysisPage> {
     final contents = <Map<String, dynamic>>[];
 
     contents.add({
-      "parts": [
-        {
-          "text":
-              "You are an expert productivity and project coach. Help with step-by-step, practical advice. Keep answers concise with checklists when useful."
-        }
-      ]
-    });
-
-    contents.add({
-      "parts": [
-        {
-          "text":
-              "Task Context:\nTitle: ${task.title}\nDue: ${DateFormat.yMMMd().format(task.dueDate)}\nPriority: ${task.priority}\nCategory: ${task.category}"
-        }
-      ]
+      "role": "system",
+      "content": "You are an expert productivity and project coach. Help with step-by-step, practical advice. Keep answers concise with checklists when useful.\n\n"
+                 "Task Context:\nTitle: ${task.title}\nDue: ${DateFormat.yMMMd().format(task.dueDate)}\nPriority: ${task.priority}\nCategory: ${task.category}"
     });
 
     for (final msg in _messages) {
       contents.add({
-        "role": msg["role"],
-        "parts": [
-          {"text": msg["text"]}
-        ],
+        "role": msg["role"] == "model" ? "assistant" : "user",
+        "content": msg["text"],
       });
     }
 
     try {
       final res = await http.post(
         Uri.parse(
-          "https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash-latest:generateContent?key=$GEMINI_API_KEY",
+          "https://api.groq.com/openai/v1/chat/completions",
         ),
-        headers: {"Content-Type": "application/json"},
-        body: jsonEncode({"contents": contents}),
+        headers: {
+          "Authorization": "Bearer ${dotenv.env['GROQ_API_KEY']}",
+          "Content-Type": "application/json"
+        },
+        body: jsonEncode({
+          "model": "gpt-oss-20b",
+          "messages": contents
+        }),
       );
 
       if (res.statusCode == 200) {
         final data = jsonDecode(res.body);
 
-        final text = data['candidates']?[0]?['content']?['parts']?[0]?['text'] ?? "…";
+        final text = data['choices']?[0]?['message']?['content'] ?? "…";
 
         setState(() {
           _messages.add({"role": "model", "text": text.toString().trim()});

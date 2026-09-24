@@ -3,10 +3,12 @@ import 'package:flutter/material.dart';
 
 class PremiumBottomBar extends StatelessWidget {
   final VoidCallback onAddPressed;
+  final VoidCallback onSettingsPressed;
 
   const PremiumBottomBar({
     super.key,
     required this.onAddPressed,
+    required this.onSettingsPressed,
   });
 
   @override
@@ -33,9 +35,9 @@ class PremiumBottomBar extends StatelessWidget {
             child: Row(
               mainAxisAlignment: MainAxisAlignment.spaceAround,
               children: [
-                _buildNavItem(Icons.space_dashboard_rounded, "Tasks", true),
+                _buildNavItem(Icons.space_dashboard_rounded, "Tasks", true, null),
                 _buildAddButton(),
-                _buildNavItem(Icons.settings_rounded, "Settings", false),
+                _buildNavItem(Icons.settings_rounded, "Settings", false, onSettingsPressed),
               ],
             ),
           ),
@@ -44,8 +46,11 @@ class PremiumBottomBar extends StatelessWidget {
     );
   }
 
-  Widget _buildNavItem(IconData icon, String label, bool isActive) {
-    return Column(
+  Widget _buildNavItem(IconData icon, String label, bool isActive, VoidCallback? onTap) {
+    return GestureDetector(
+      onTap: onTap,
+      behavior: HitTestBehavior.opaque,
+      child: Column(
       mainAxisSize: MainAxisSize.min,
       children: [
         Icon(
@@ -63,6 +68,7 @@ class PremiumBottomBar extends StatelessWidget {
           ),
         ),
       ],
+    ),
     );
   }
 

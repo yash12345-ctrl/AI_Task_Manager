@@ -4,11 +4,13 @@ import 'package:flutter/material.dart';
 class PremiumTopBar extends StatelessWidget implements PreferredSizeWidget {
   final String title;
   final VoidCallback onCalendarPressed;
+  final VoidCallback onSearchPressed;
 
   const PremiumTopBar({
     super.key,
     required this.title,
     required this.onCalendarPressed,
+    required this.onSearchPressed,
   });
 
   @override
@@ -49,23 +51,47 @@ class PremiumTopBar extends StatelessWidget implements PreferredSizeWidget {
                       ),
                     ],
                   ),
-                  Container(
-                    decoration: BoxDecoration(
-                      color: Colors.white,
-                      shape: BoxShape.circle,
-                      boxShadow: [
-                        BoxShadow(
-                          color: Colors.black.withOpacity(0.08),
-                          blurRadius: 12,
-                          offset: const Offset(0, 4),
+                  Row(
+                    mainAxisSize: MainAxisSize.min,
+                    children: [
+                      Container(
+                        decoration: BoxDecoration(
+                          color: Colors.white,
+                          shape: BoxShape.circle,
+                          boxShadow: [
+                            BoxShadow(
+                              color: Colors.black.withOpacity(0.08),
+                              blurRadius: 12,
+                              offset: const Offset(0, 4),
+                            ),
+                          ],
                         ),
-                      ],
-                    ),
-                    child: IconButton(
-                      onPressed: onCalendarPressed,
-                      icon: const Icon(Icons.auto_awesome_mosaic_rounded, color: Colors.blueAccent),
-                      tooltip: "AI Calendar",
-                    ),
+                        child: IconButton(
+                          onPressed: onSearchPressed,
+                          icon: const Icon(Icons.search_rounded, color: Colors.blueAccent),
+                          tooltip: "Search & Filter",
+                        ),
+                      ),
+                      const SizedBox(width: 12),
+                      Container(
+                        decoration: BoxDecoration(
+                          color: Colors.white,
+                          shape: BoxShape.circle,
+                          boxShadow: [
+                            BoxShadow(
+                              color: Colors.black.withOpacity(0.08),
+                              blurRadius: 12,
+                              offset: const Offset(0, 4),
+                            ),
+                          ],
+                        ),
+                        child: IconButton(
+                          onPressed: onCalendarPressed,
+                          icon: const Icon(Icons.auto_awesome_mosaic_rounded, color: Colors.blueAccent),
+                          tooltip: "AI Calendar",
+                        ),
+                      ),
+                    ],
                   ),
                 ],
               ),

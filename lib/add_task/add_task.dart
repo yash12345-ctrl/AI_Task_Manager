@@ -11,6 +11,10 @@ void showAddTaskBottomSheet(
 ) {
   String title = '';
   DateTime dueDate = DateTime.now();
+  TimeOfDay? dueTime;
+  DateTime? startDate;
+  Recurrence recurrence = Recurrence.none;
+  int reminderMinutes = 0;
   String priority = 'P2';
   String category = 'Work';
   String? selectedProjectId;
@@ -66,19 +70,11 @@ void showAddTaskBottomSheet(
     );
   }
 
-  showModalBottomSheet(
-    context: context,
-    isScrollControlled: true,
-    backgroundColor: Colors.transparent,
-    builder: (context) {
-      return StatefulBuilder(builder: (context, setModalState) {
-        return LayoutBuilder(
-          builder: (context, constraints) {
-            return DraggableScrollableSheet(
-              initialChildSize: 0.9,
-              maxChildSize: 0.95,
-              minChildSize: 0.6,
-              builder: (_, controller) => Container(
+  final bool isWide = MediaQuery.of(context).size.width > 650;
+  
+  Widget buildContent(BuildContext context, StateSetter setModalState, ScrollController controller) {
+    return LayoutBuilder(builder: (context, constraints) {
+      return Container(
                 padding: EdgeInsets.symmetric(
                   horizontal: constraints.maxWidth < 500 ? 20 : 40,
                   vertical: constraints.maxHeight < 700 ? 20 : 35,
@@ -134,23 +130,109 @@ void showAddTaskBottomSheet(
                           onSaved: (val) => title = val!,
                         ),
                         const SizedBox(height: 15),
+                        Row(
+                          children: [
+                            Expanded(
+                              child: ListTile(
+                                contentPadding: EdgeInsets.zero,
+                                title: const Text("Due Date"),
+                                subtitle: Text(DateFormat.yMMMd().format(dueDate)),
+                                trailing: const Icon(Icons.calendar_today, color: Colors.blue, size: 20),
+                                onTap: () async {
+                                  final picked = await showDatePicker(
+                                    context: context,
+                                    initialDate: dueDate,
+                                    firstDate: DateTime.now(),
+                                    lastDate: DateTime(2100),
+                                  );
+                                  if (picked != null && picked != dueDate) {
+                                    setModalState(() {
+                                      dueDate = picked;
+                                    });
+                                  }
+                                },
+                              ),
+                            ),
+                            const SizedBox(width: 10),
+                            Expanded(
+                              child: ListTile(
+                                contentPadding: EdgeInsets.zero,
+                                title: const Text("Time"),
+                                subtitle: Text(dueTime?.format(context) ?? "Set time"),
+                                trailing: const Icon(Icons.access_time, color: Colors.blue, size: 20),
+                                onTap: () async {
+                                  final picked = await showTimePicker(
+                                    context: context,
+                                    initialTime: dueTime ?? TimeOfDay.now(),
+                                  );
+                                  if (picked != null) {
+                                    setModalState(() {
+                                      dueTime = picked;
+                                    });
+                                  }
+                                },
+                              ),
+                            ),
+                          ],
+                        ),
+                        const SizedBox(height: 10),
                         ListTile(
                           contentPadding: EdgeInsets.zero,
-                          title: const Text("Due Date"),
-                          subtitle: Text(DateFormat.yMMMd().format(dueDate)),
-                          trailing: const Icon(Icons.calendar_today, color: Colors.blue),
+                          title: const Text("Start Date (Optional)"),
+                          subtitle: Text(startDate != null ? DateFormat.yMMMd().format(startDate!) : "For timeline view"),
+                          trailing: const Icon(Icons.start, color: Colors.blue, size: 20),
                           onTap: () async {
                             final picked = await showDatePicker(
                               context: context,
-                              initialDate: dueDate,
-                              firstDate: DateTime.now(),
+                              initialDate: startDate ?? DateTime.now(),
+                              firstDate: DateTime(2000),
                               lastDate: DateTime(2100),
                             );
-                            if (picked != null && picked != dueDate) {
+                            if (picked != null) {
                               setModalState(() {
-                                dueDate = picked;
+                                startDate = picked;
                               });
                             }
+                          },
+                        ),
+                        const SizedBox(height: 10),
+                        DropdownButtonFormField<Recurrence>(
+                          isExpanded: true,
+                          decoration: InputDecoration(
+                            labelText: 'Recurrence',
+                            prefixIcon: const Icon(Icons.repeat, color: Colors.blue),
+                            border: OutlineInputBorder(borderRadius: BorderRadius.circular(12)),
+                          ),
+                          value: recurrence,
+                          items: const [
+                            DropdownMenuItem(value: Recurrence.none, child: Text("None")),
+                            DropdownMenuItem(value: Recurrence.daily, child: Text("Daily")),
+                            DropdownMenuItem(value: Recurrence.weekdays, child: Text("Weekdays")),
+                            DropdownMenuItem(value: Recurrence.weekly, child: Text("Weekly")),
+                            DropdownMenuItem(value: Recurrence.monthly, child: Text("Monthly")),
+                          ],
+                          onChanged: (val) {
+                            if (val != null) setModalState(() => recurrence = val);
+                          },
+                        ),
+                        const SizedBox(height: 15),
+                        DropdownButtonFormField<int>(
+                          isExpanded: true,
+                          decoration: InputDecoration(
+                            labelText: 'Reminder',
+                            prefixIcon: const Icon(Icons.notifications, color: Colors.blue),
+                            border: OutlineInputBorder(borderRadius: BorderRadius.circular(12)),
+                          ),
+                          value: reminderMinutes,
+                          items: const [
+                            DropdownMenuItem(value: 0, child: Text("No reminder")),
+                            DropdownMenuItem(value: 10, child: Text("10 minutes before")),
+                            DropdownMenuItem(value: 30, child: Text("30 minutes before")),
+                            DropdownMenuItem(value: 60, child: Text("1 hour before")),
+                            DropdownMenuItem(value: 1440, child: Text("1 day before")),
+                          ],
+                          onChanged: (val) {
+                            if (val != null) setModalState(() => reminderMinutes = val);
                           },
                         ),
                         const SizedBox(height: 15),
@@ -158,6 +240,7 @@ void showAddTaskBottomSheet(
                           children: [
                             Expanded(
                               child: DropdownButtonFormField<String>(
+                                isExpanded: true,
                                 value: priority,
                                 decoration: InputDecoration(
                                   labelText: "Priority",
@@ -175,6 +258,7 @@ void showAddTaskBottomSheet(
                             const SizedBox(width: 10),
                             Expanded(
                               child: DropdownButtonFormField<String>(
+                                isExpanded: true,
                                 value: category,
                                 decoration: InputDecoration(
                                   labelText: "Category",
@@ -196,6 +280,7 @@ void showAddTaskBottomSheet(
                           children: [
                             Expanded(
                               child: DropdownButtonFormField<String?>(
+                                isExpanded: true,
                                 value: selectedProjectId,
                                 decoration: InputDecoration(
                                   labelText: "Project (Optional)",
@@ -338,7 +423,9 @@ void showAddTaskBottomSheet(
                                 final newTask = Task(
                                   id: uuid.v4(),
                                   title: title,
-                                  dueDate: dueDate,
+                                  dueDate: dueTime != null 
+                                      ? DateTime(dueDate.year, dueDate.month, dueDate.day, dueTime!.hour, dueTime!.minute)
+                                      : dueDate,
                                   priority: priority,
                                   category: category,
                                   isCompleted: false,
@@ -346,6 +433,9 @@ void showAddTaskBottomSheet(
                                   tags: tags.toList(),
                                   subtasks: subtasks.toList(),
                                   orderIndex: 0,
+                                  hasTime: dueTime != null,
+                                  recurrence: recurrence,
+                                  reminderMinutes: reminderMinutes,
                                 );
                                 onTaskAdded(newTask);
                                 Navigator.pop(context);
@@ -362,11 +452,41 @@ void showAddTaskBottomSheet(
                     ),
                   ),
                 ),
-              ),
-            );
-          },
-        );
-      });
-    },
-  );
+              );
+    });
+  }
+
+  if (isWide) {
+    showDialog(
+      context: context,
+      builder: (context) => Dialog(
+        backgroundColor: Colors.transparent,
+        child: ConstrainedBox(
+          constraints: const BoxConstraints(maxWidth: 600, maxHeight: 800),
+          child: StatefulBuilder(
+            builder: (context, setModalState) => ClipRRect(
+              borderRadius: BorderRadius.circular(25),
+              child: buildContent(context, setModalState, ScrollController()),
+            )
+          ),
+        ),
+      ),
+    );
+  } else {
+    showModalBottomSheet(
+      context: context,
+      isScrollControlled: true,
+      backgroundColor: Colors.transparent,
+      builder: (context) {
+        return StatefulBuilder(builder: (context, setModalState) {
+          return DraggableScrollableSheet(
+            initialChildSize: 0.9,
+            maxChildSize: 0.95,
+            minChildSize: 0.6,
+            builder: (_, controller) => buildContent(context, setModalState, controller),
+          );
+        });
+      },
+    );
+  }
 }

@@ -11,14 +11,18 @@ import 'widgets/top_bar.dart';
 import 'widgets/bottom_bar.dart';
 import 'add_task/add_task.dart';
 import 'ai_task_analysis/ai_insights_card.dart';
-import 'ai_task_analysis/ai_calendar.dart';
+import 'calendar/calendar_page.dart';
 import "ai_task_analysis/task_analysis_page.dart";
 import 'package:flutter_dotenv/flutter_dotenv.dart';
 import 'models/task_model.dart';
 import 'services/export_service.dart';
+import 'settings/settings_page.dart';
 import 'scheduling/notification_service.dart';
 import 'scheduling/recurrence_manager.dart';
+import 'scheduling/calendar_sync_service.dart';
 export 'models/task_model.dart';
+import 'services/api/groq_api_manager.dart';
+import 'package:in_app_update/in_app_update.dart';
 
 
 class TaskPage extends StatefulWidget {
@@ -40,6 +44,7 @@ class _TaskPageState extends State<TaskPage> {
   String _searchQuery = '';
   String? _filterPriority;
   String? _filterCategory;
+  String _userName = 'User';
 
 
   bool _isLoadingAI = false;
@@ -51,12 +56,33 @@ class _TaskPageState extends State<TaskPage> {
     super.initState();
     _selectedDay = _focusedDay;
     _loadData();
+    // WidgetsBinding.instance.addPostFrameCallback((_) {
+    //   _checkForUpdate();
+    // });
+  }
+
+  Future<void> _checkForUpdate() async {
+    try {
+      final info = await InAppUpdate.checkForUpdate();
+      if (info.updateAvailability == UpdateAvailability.updateAvailable) {
+        if (info.immediateUpdateAllowed) {
+          await InAppUpdate.performImmediateUpdate();
+        } else if (info.flexibleUpdateAllowed) {
+          await InAppUpdate.startFlexibleUpdate();
+          await InAppUpdate.completeFlexibleUpdate();
+        }
+      }
+    } catch (e) {
+      print("InAppUpdate Error: $e");
+    }
   }
 
   Future<void> _loadData() async {
     try {
       final prefs = await SharedPreferences.getInstance();
       
+      _userName = prefs.getString('userName') ?? 'User';
+
       final String? projectsJson = prefs.getString('projects');
       if (projectsJson != null) {
         final List<dynamic> decodedProjects = jsonDecode(projectsJson);
@@ -96,6 +122,83 @@ class _TaskPageState extends State<TaskPage> {
   @override
   void dispose() {
     super.dispose();
+  }
+
+  void _openCalendarPage({bool showHint = false}) {
+    Navigator.push(
+      context,
+      MaterialPageRoute(
+        builder: (context) => PremiumCalendarPage(
+          tasks: _allTasks,
+          onSync: _syncWithCalendar,
+          showSyncHint: showHint,
+        ),
+      ),
+    ).then((_) {
+      if (mounted) setState(() {});
+    });
+  }
+
+  Future<void> _syncWithCalendar() async {
+    final calendars = await CalendarSyncService().getCalendars();
+    if (calendars.isEmpty) {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(content: Text('No calendars found or permission denied.')),
+        );
+      }
+      return;
+    }
+
+    // Let the user choose a calendar (simplification: use the first writable one for now, or show a dialog)
+    final selectedCalendar = await showDialog(
+      context: context,
+      builder: (context) {
+        return AlertDialog(
+          title: const Text('Select Calendar to Sync'),
+          content: SizedBox(
+            width: double.maxFinite,
+            child: ListView.builder(
+              shrinkWrap: true,
+              itemCount: calendars.length,
+              itemBuilder: (context, index) {
+                final calendar = calendars[index];
+                return ListTile(
+                  title: Text(calendar.name ?? 'Unnamed Calendar'),
+                  subtitle: Text(calendar.accountName ?? ''),
+                  onTap: () => Navigator.of(context).pop(calendar),
+                );
+              },
+            ),
+          ),
+        );
+      }
+    );
+
+    if (selectedCalendar == null) return;
+
+    if (mounted) {
+       ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(content: Text('Syncing with calendar...')),
+       );
+    }
+
+    final importedTasks = await CalendarSyncService().syncWithCalendar(_allTasks, selectedCalendar);
+
+    if (mounted) {
+      setState(() {
+        for (var importedTask in importedTasks) {
+          // If task ID doesn't exist, add it
+          if (!_allTasks.any((t) => t.id == importedTask.id)) {
+            _allTasks.add(importedTask);
+          }
+        }
+      });
+      _saveData();
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(content: Text('Synced! Imported ${importedTasks.length} events.')),
+      );
+    }
   }
 
   Future<void> _fetchAISuggestions(List<Task> tasks) async {
@@ -142,54 +245,44 @@ class _TaskPageState extends State<TaskPage> {
                 })
             .toList();
 
-        final response = await http.post(
-          Uri.parse(
-            "https://api.groq.com/openai/v1/chat/completions",
-          ),
-          headers: {
-            "Authorization": "Bearer ${dotenv.env['GROQ_API_KEY']}",
-            "Content-Type": "application/json",
-          },
-          body: jsonEncode({
-            "model": "openai/gpt-oss-20b",
-            "messages": [
-              {
-                "role": "user",
-                "content": "You are a smart task assistant. I have ${taskData.length} pending tasks: $taskData\nFor EACH task, provide exactly 1 short, actionable suggestion. Format your response as exactly ${taskData.length} lines of plain text. Do not include numbers, bullet points, or any introductory/concluding remarks."
+        final aiText = await GroqApiManager().fetchAISuggestions(taskData);
+        
+        if (aiText != null && aiText.isNotEmpty) {
+          if (aiText == "LIMIT_REACHED" || aiText == "ALL_KEYS_EXHAUSTED") {
+             if (currentSuggestions.isEmpty) {
+               currentSuggestions = ["🧠 AI Limit Reached for today. Don't worry, you can still manage your tasks manually!"];
+             }
+          } else if (aiText.startsWith("⚠️")) {
+             if (currentSuggestions.isEmpty) {
+               currentSuggestions = ["The AI is currently on a coffee break. You're on your own, good luck! ☕"];
+             }
+          } else {
+            final newSuggestions = aiText
+                .split("\n")
+                .map((s) => s.replaceAll(RegExp(r'^[\d\.\-\*]+\s*'), '').trim())
+                .where((s) => s.isNotEmpty)
+                .take(tasksToFetch.length)
+                .toList();
+
+            // Save fetched suggestions to cache
+            for (int i = 0; i < newSuggestions.length; i++) {
+              final task = tasksToFetch[i];
+              final suggestion = newSuggestions[i];
+              await prefs.setString('ai_insight_${task.id}', suggestion);
+            }
+
+            // Rebuild final list in order
+            currentSuggestions = [];
+            for (final task in pendingTasks) {
+              final cached = prefs.getString('ai_insight_${task.id}');
+              if (cached != null && cached.isNotEmpty) {
+                currentSuggestions.add(cached);
               }
-            ]
-          }),
-        );
-
-        if (response.statusCode == 200) {
-          final data = jsonDecode(response.body);
-          final aiText = data['choices']?[0]?['message']?['content'] ?? "";
-
-          final newSuggestions = (aiText as String)
-              .split("\n")
-              .map((s) => s.replaceAll(RegExp(r'^[\d\.\-\*]+\s*'), '').trim())
-              .where((s) => s.isNotEmpty)
-              .take(tasksToFetch.length)
-              .toList();
-
-          // Save fetched suggestions to cache
-          for (int i = 0; i < newSuggestions.length; i++) {
-            final task = tasksToFetch[i];
-            final suggestion = newSuggestions[i];
-            await prefs.setString('ai_insight_${task.id}', suggestion);
-          }
-
-          // Rebuild final list in order
-          currentSuggestions = [];
-          for (final task in pendingTasks) {
-            final cached = prefs.getString('ai_insight_${task.id}');
-            if (cached != null && cached.isNotEmpty) {
-              currentSuggestions.add(cached);
             }
           }
         } else {
           if (currentSuggestions.isEmpty) {
-            currentSuggestions = ["⚠️ Failed to fetch AI suggestions. (${response.statusCode})"];
+            currentSuggestions = ["⚠️ Failed to fetch AI suggestions."];
           }
         }
       }
@@ -275,9 +368,6 @@ class _TaskPageState extends State<TaskPage> {
     );
   }
 
-  void _showAICalendar(List<Task> allTasks) {
-    showPremiumAICalendar(context, allTasks);
-  }
 
   Color _priorityColor(String priority) {
     switch (priority) {
@@ -293,28 +383,28 @@ class _TaskPageState extends State<TaskPage> {
     }
   }
 
-  List<Task> _getProcessedTasks(List<Task> allTasks, bool isCompleted) {
+  List<Task> _getProcessedTasks(List<Task> allTasks, bool isCompletedList) {
     List<Task> filteredTasks = allTasks.where((task) {
-      // 1. Basic completion filter (if called for active tasks)
-      if (isCompleted && _currentView != 'Completed') return false; 
-      if (!isCompleted && task.isCompleted) return false;
+      // 1. Basic completion split
+      if (isCompletedList && !task.isCompleted) return false;
+      if (!isCompletedList && task.isCompleted) return false;
 
       // 2. View Filter
       if (_currentView == 'Today') {
-        if (task.isCompleted) return false;
+        if (isCompletedList) return false;
         final now = DateTime.now();
         final today = DateTime(now.year, now.month, now.day);
         final taskDate = DateTime(task.dueDate.year, task.dueDate.month, task.dueDate.day);
         if (taskDate.isAfter(today)) return false; 
       } else if (_currentView == 'Upcoming') {
-        if (task.isCompleted) return false;
+        if (isCompletedList) return false;
         final now = DateTime.now();
         final tomorrow = DateTime(now.year, now.month, now.day).add(const Duration(days: 1));
         final nextWeek = tomorrow.add(const Duration(days: 6));
         final taskDate = DateTime(task.dueDate.year, task.dueDate.month, task.dueDate.day);
         if (taskDate.isBefore(tomorrow) || taskDate.isAfter(nextWeek)) return false;
       } else if (_currentView == 'Completed') {
-        if (!task.isCompleted) return false;
+        if (!isCompletedList) return false;
       }
 
       // 3. Search & Advanced Filters
@@ -395,8 +485,9 @@ class _TaskPageState extends State<TaskPage> {
       extendBody: true,
       appBar: PremiumTopBar(
         title: "My Tasks",
-        onCalendarPressed: () => _showAICalendar(_allTasks),
+        userName: _userName,
         onSearchPressed: _showSearchAndFilterSheet,
+        onSyncPressed: _openCalendarPage,
       ),
       bottomNavigationBar: isWide ? null : PremiumBottomBar(
         onAddPressed: _showAddTaskDialog,
@@ -421,103 +512,63 @@ class _TaskPageState extends State<TaskPage> {
               const SizedBox(height: 24),
 
 
-              // View Selector
-              SingleChildScrollView(
-                scrollDirection: Axis.horizontal,
-                child: Row(
-                  children: ['All', 'Today', 'Upcoming', 'Completed'].map((view) {
-                    final isSelected = _currentView == view;
-                    return Padding(
-                      padding: const EdgeInsets.only(right: 10),
-                      child: ChoiceChip(
-                        label: Text(view),
-                        selected: isSelected,
-                        onSelected: (selected) {
-                          if (selected) setState(() => _currentView = view);
-                        },
-                        selectedColor: Colors.blueAccent,
-                        backgroundColor: Colors.white,
-                        labelStyle: TextStyle(
-                          color: isSelected ? Colors.white : Colors.black87,
-                          fontWeight: FontWeight.bold,
-                        ),
-                        shape: RoundedRectangleBorder(
-                          borderRadius: BorderRadius.circular(20),
-                          side: BorderSide(color: isSelected ? Colors.transparent : Colors.grey.shade300),
-                        ),
+              // Modern Filter & View Row
+              Row(
+                crossAxisAlignment: CrossAxisAlignment.center,
+                children: [
+                  Expanded(
+                    child: SingleChildScrollView(
+                      scrollDirection: Axis.horizontal,
+                      physics: const BouncingScrollPhysics(),
+                      child: Row(
+                        children: ['All', 'Today', 'Upcoming', 'Completed'].map((view) {
+                          final isSelected = _currentView == view;
+                          return GestureDetector(
+                            onTap: () => setState(() => _currentView = view),
+                            child: AnimatedContainer(
+                              duration: const Duration(milliseconds: 200),
+                              margin: const EdgeInsets.only(right: 12),
+                              padding: const EdgeInsets.symmetric(horizontal: 20, vertical: 10),
+                              decoration: BoxDecoration(
+                                color: isSelected ? Colors.black87 : Colors.white,
+                                borderRadius: BorderRadius.circular(24),
+                                boxShadow: isSelected
+                                    ? [BoxShadow(color: Colors.black.withOpacity(0.2), blurRadius: 8, offset: const Offset(0, 4))]
+                                    : [BoxShadow(color: Colors.black.withOpacity(0.04), blurRadius: 4, offset: const Offset(0, 2))],
+                              ),
+                              child: Text(
+                                view,
+                                style: TextStyle(
+                                  color: isSelected ? Colors.white : Colors.black87,
+                                  fontWeight: isSelected ? FontWeight.w700 : FontWeight.w600,
+                                  fontSize: 14,
+                                ),
+                              ),
+                            ),
+                          );
+                        }).toList(),
                       ),
-                    );
-                  }).toList(),
-                ),
-              ),
-              const SizedBox(height: 16),
-
-              // View Mode Selector
-              SingleChildScrollView(
-                scrollDirection: Axis.horizontal,
-                child: Row(
-                  children: ['List', 'Kanban', 'Calendar', 'Timeline'].map((mode) {
-                    final isSelected = _viewMode == mode;
-                    return Padding(
-                      padding: const EdgeInsets.only(right: 10, bottom: 16),
-                      child: ChoiceChip(
-                        label: Text(mode),
-                        selected: isSelected,
-                        onSelected: (selected) async {
-                          if (selected) {
-                            setState(() => _viewMode = mode);
-                            final prefs = await SharedPreferences.getInstance();
-                            prefs.setString('viewMode', mode);
-                          }
-                        },
-                        selectedColor: Colors.deepPurpleAccent,
-                        backgroundColor: Colors.white,
-                        labelStyle: TextStyle(
-                          color: isSelected ? Colors.white : Colors.black87,
-                          fontWeight: FontWeight.bold,
-                        ),
-                        shape: RoundedRectangleBorder(
-                          borderRadius: BorderRadius.circular(12),
-                          side: BorderSide(color: isSelected ? Colors.transparent : Colors.grey.shade300),
-                        ),
+                    ),
+                  ),
+                  const SizedBox(width: 12),
+                  // Filter & Sort Button
+                  GestureDetector(
+                    onTap: _showViewOptionsSheet,
+                    child: Container(
+                      padding: const EdgeInsets.all(12),
+                      decoration: BoxDecoration(
+                        color: Colors.white,
+                        shape: BoxShape.circle,
+                        boxShadow: [
+                          BoxShadow(color: Colors.black.withOpacity(0.05), blurRadius: 8, offset: const Offset(0, 4)),
+                        ],
                       ),
-                    );
-                  }).toList(),
-                ),
+                      child: const Icon(Icons.tune_rounded, color: Colors.black87, size: 20),
+                    ),
+                  ),
+                ],
               ),
-
-              // Sleek Sorting Chips
-              SingleChildScrollView(
-                scrollDirection: Axis.horizontal,
-                child: Row(
-                  children: ['DueDate', 'Priority', 'Title', 'Custom'].map((sortOption) {
-                    final isSelected = _sortBy == sortOption;
-                    return Padding(
-                      padding: const EdgeInsets.only(right: 10),
-                      child: ChoiceChip(
-                        label: Text(sortOption),
-                        selected: isSelected,
-                        onSelected: (selected) {
-                          if (selected) setState(() => _sortBy = sortOption);
-                        },
-                        selectedColor: Colors.black87,
-                        backgroundColor: Colors.white,
-                        labelStyle: TextStyle(
-                          color: isSelected ? Colors.white : Colors.black87,
-                          fontWeight: FontWeight.w600,
-                        ),
-                        shape: RoundedRectangleBorder(
-                          borderRadius: BorderRadius.circular(20),
-                          side: BorderSide(
-                            color: isSelected ? Colors.transparent : Colors.grey.shade300,
-                          ),
-                        ),
-                      ),
-                    );
-                  }).toList(),
-                ),
-              ),
-              const SizedBox(height: 20),
+              const SizedBox(height: 24),
 
               // Task List
               if (activeTasks.isEmpty && completedTasks.isEmpty)
@@ -535,8 +586,7 @@ class _TaskPageState extends State<TaskPage> {
                     ),
                   ),
                 )
-              else if (_viewMode == 'Kanban')
-                _buildKanbanView(activeTasks, completedTasks)
+
               else if (_viewMode == 'Calendar')
                 _buildCalendarView(activeTasks, completedTasks)
               else if (_viewMode == 'Timeline')
@@ -544,6 +594,21 @@ class _TaskPageState extends State<TaskPage> {
               else ...[
                 if (_currentView == 'Completed')
                   Column(children: completedTasks.map((task) => _buildTaskTile(task, isWide: isWide)).toList())
+                else if (_currentView == 'All')
+                  Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      _buildActiveTasks(activeTasks, isWide),
+                      if (completedTasks.isNotEmpty) ...[
+                        const SizedBox(height: 24),
+                        const Padding(
+                          padding: EdgeInsets.only(left: 8.0, bottom: 8.0),
+                          child: Text("COMPLETED", style: TextStyle(fontSize: 13, fontWeight: FontWeight.bold, color: Colors.grey, letterSpacing: 1.2)),
+                        ),
+                        Column(children: completedTasks.map((task) => _buildTaskTile(task, isWide: isWide)).toList()),
+                      ]
+                    ]
+                  )
                 else
                   _buildActiveTasks(activeTasks, isWide),
               ],
@@ -598,6 +663,121 @@ if (isWide) {
 return mainScaffold;
 }
 
+  void _showViewOptionsSheet() {
+    showModalBottomSheet(
+      context: context,
+      backgroundColor: Colors.transparent,
+      isScrollControlled: true,
+      builder: (context) {
+        return StatefulBuilder(
+          builder: (context, setSheetState) {
+            return Container(
+              padding: const EdgeInsets.all(24),
+              decoration: const BoxDecoration(
+                color: Colors.white,
+                borderRadius: BorderRadius.vertical(top: Radius.circular(28)),
+              ),
+              child: Column(
+                mainAxisSize: MainAxisSize.min,
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Center(
+                    child: Container(
+                      width: 40,
+                      height: 4,
+                      decoration: BoxDecoration(
+                        color: Colors.grey.shade300,
+                        borderRadius: BorderRadius.circular(2),
+                      ),
+                    ),
+                  ),
+                  const SizedBox(height: 24),
+                  const Text("View Options", style: TextStyle(fontSize: 22, fontWeight: FontWeight.bold, color: Colors.black87)),
+                  const SizedBox(height: 24),
+                  const Text("LAYOUT", style: TextStyle(fontSize: 12, fontWeight: FontWeight.w700, color: Colors.black45, letterSpacing: 1.2)),
+                  const SizedBox(height: 12),
+                  Wrap(
+                    spacing: 10,
+                    runSpacing: 10,
+                    children: ['List', 'Calendar', 'Timeline'].map((mode) {
+                      final isSelected = _viewMode == mode;
+                      return ChoiceChip(
+                        label: Text(mode),
+                        selected: isSelected,
+                        onSelected: (selected) async {
+                          if (selected) {
+                            setSheetState(() => _viewMode = mode);
+                            setState(() => _viewMode = mode);
+                            final prefs = await SharedPreferences.getInstance();
+                            prefs.setString('viewMode', mode);
+                          }
+                        },
+                        selectedColor: Colors.black87,
+                        backgroundColor: Colors.white,
+                        labelStyle: TextStyle(
+                          color: isSelected ? Colors.white : Colors.black87,
+                          fontWeight: FontWeight.w600,
+                        ),
+                        shape: RoundedRectangleBorder(
+                          borderRadius: BorderRadius.circular(20),
+                          side: BorderSide(color: isSelected ? Colors.transparent : Colors.grey.shade300),
+                        ),
+                      );
+                    }).toList(),
+                  ),
+                  const SizedBox(height: 24),
+                  const Text("SORT BY", style: TextStyle(fontSize: 12, fontWeight: FontWeight.w700, color: Colors.black45, letterSpacing: 1.2)),
+                  const SizedBox(height: 12),
+                  Wrap(
+                    spacing: 10,
+                    runSpacing: 10,
+                    children: ['DueDate', 'Priority', 'Title', 'Custom'].map((sortOption) {
+                      final isSelected = _sortBy == sortOption;
+                      return ChoiceChip(
+                        label: Text(sortOption),
+                        selected: isSelected,
+                        onSelected: (selected) {
+                          if (selected) {
+                            setSheetState(() => _sortBy = sortOption);
+                            setState(() => _sortBy = sortOption);
+                          }
+                        },
+                        selectedColor: Colors.black87,
+                        backgroundColor: Colors.white,
+                        labelStyle: TextStyle(
+                          color: isSelected ? Colors.white : Colors.black87,
+                          fontWeight: FontWeight.w600,
+                        ),
+                        shape: RoundedRectangleBorder(
+                          borderRadius: BorderRadius.circular(20),
+                          side: BorderSide(color: isSelected ? Colors.transparent : Colors.grey.shade300),
+                        ),
+                      );
+                    }).toList(),
+                  ),
+                  const SizedBox(height: 32),
+                  SizedBox(
+                    width: double.infinity,
+                    child: ElevatedButton(
+                      style: ElevatedButton.styleFrom(
+                        backgroundColor: Colors.black87,
+                        padding: const EdgeInsets.symmetric(vertical: 16),
+                        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)),
+                      ),
+                      onPressed: () => Navigator.pop(context),
+                      child: const Text("Apply", style: TextStyle(color: Colors.white, fontSize: 16, fontWeight: FontWeight.bold)),
+                    ),
+                  ),
+                  const SizedBox(height: 16),
+                ],
+              ),
+            );
+          }
+        );
+      },
+    );
+  }
+
   Widget _buildTaskTile(Task task, {required bool isWide}) {
     int completedSubtasks = task.subtasks.where((s) => s.isCompleted).length;
     int totalSubtasks = task.subtasks.length;
@@ -615,11 +795,19 @@ return mainScaffold;
     return Dismissible(
       key: Key(task.id),
       direction: DismissDirection.horizontal,
+      confirmDismiss: (direction) async {
+        if (direction == DismissDirection.startToEnd) {
+          _snoozeTask(task);
+          if (mounted) {
+            ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('Task snoozed for 1 day')));
+          }
+          return false; // Slide back instead of removing from tree
+        }
+        return true;
+      },
       onDismissed: (direction) {
         if (direction == DismissDirection.endToStart) {
           _deleteTask(task);
-        } else if (direction == DismissDirection.startToEnd) {
-          _snoozeTask(task);
         }
       },
       background: Container(
@@ -889,153 +1077,30 @@ return mainScaffold;
   }
 
   void _showSettingsSheet() {
-    final bool isWide = MediaQuery.of(context).size.width > 650;
-    final Widget content = Container(
-          padding: const EdgeInsets.all(24),
-          decoration: const BoxDecoration(
-            color: Colors.white,
-            borderRadius: BorderRadius.vertical(top: Radius.circular(28)),
-          ),
-          child: Column(
-            mainAxisSize: MainAxisSize.min,
-            crossAxisAlignment: CrossAxisAlignment.start,
-            children: [
-              const Text("Settings", style: TextStyle(fontSize: 22, fontWeight: FontWeight.bold)),
-              const SizedBox(height: 24),
-              ListTile(
-                leading: const Icon(Icons.data_object, color: Colors.blueAccent),
-                title: const Text("Export to JSON"),
-                subtitle: const Text("Raw data for backups or APIs"),
-                onTap: () {
-                  Navigator.pop(context);
-                  ExportService.exportToJson(_allTasks);
-                },
-              ),
-              ListTile(
-                leading: const Icon(Icons.table_chart, color: Colors.green),
-                title: const Text("Export to CSV"),
-                subtitle: const Text("Spreadsheet compatible format"),
-                onTap: () {
-                  Navigator.pop(context);
-                  ExportService.exportToCsv(_allTasks);
-                },
-              ),
-              const SizedBox(height: 16),
-            ],
-          ),
-        );
-
-    if (isWide) {
-      showDialog(
-        context: context,
-        builder: (context) => Dialog(
-          shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(28)),
-          child: ConstrainedBox(
-            constraints: const BoxConstraints(maxWidth: 400),
-            child: ClipRRect(borderRadius: BorderRadius.circular(28), child: content),
-          ),
+    Navigator.push(
+      context,
+      MaterialPageRoute(
+        builder: (_) => SettingsPage(
+          tasks: _allTasks,
+          userName: _userName,
+          onNameChanged: (newName) async {
+            setState(() {
+              _userName = newName;
+            });
+            final prefs = await SharedPreferences.getInstance();
+            await prefs.setString('userName', newName);
+          },
+          onOpenCalendar: () {
+            // Close Settings page first
+            Navigator.pop(context);
+            // Open Calendar page with hint
+            _openCalendarPage(showHint: true);
+          },
         ),
-      );
-    } else {
-      showModalBottomSheet(
-        context: context,
-        backgroundColor: Colors.transparent,
-        builder: (context) => content,
-      );
-    }
-  }
-
-  Widget _buildKanbanView(List<Task> active, List<Task> completed) {
-    final all = [...active, ...completed];
-    final todo = all.where((t) => t.status == 'Todo').toList();
-    final inProgress = all.where((t) => t.status == 'In Progress').toList();
-    final done = all.where((t) => t.status == 'Done').toList();
-
-    return LayoutBuilder(builder: (context, constraints) {
-      final bool expand = constraints.maxWidth > (320 * 3 + 16 * 2);
-      final Widget row = Row(
-        crossAxisAlignment: CrossAxisAlignment.start,
-        children: [
-          expand ? Expanded(child: _buildKanbanColumn('Todo', todo, expand)) : _buildKanbanColumn('Todo', todo, expand),
-          expand ? Expanded(child: _buildKanbanColumn('In Progress', inProgress, expand)) : _buildKanbanColumn('In Progress', inProgress, expand),
-          expand ? Expanded(child: _buildKanbanColumn('Done', done, expand)) : _buildKanbanColumn('Done', done, expand),
-        ],
-      );
-      if (expand) return row;
-      return SingleChildScrollView(scrollDirection: Axis.horizontal, child: row);
-    });
-  }
-
-  Widget _buildKanbanColumn(String title, List<Task> tasks, bool expanded) {
-    return DragTarget<Task>(
-      onWillAccept: (data) => true,
-      onAccept: (task) {
-        if (task.status == title) return;
-        setState(() {
-          task.status = title;
-          if (title == 'Done') {
-            task.isCompleted = true;
-          } else {
-            task.isCompleted = false;
-          }
-        });
-        _saveData();
-      },
-      builder: (context, candidateData, rejectedData) {
-        return Container(
-          width: expanded ? null : 320,
-          margin: const EdgeInsets.only(right: 16),
-          decoration: BoxDecoration(
-            color: candidateData.isNotEmpty ? Colors.blue.withOpacity(0.1) : Colors.transparent,
-            borderRadius: BorderRadius.circular(16),
-          ),
-          child: Column(
-            crossAxisAlignment: CrossAxisAlignment.start,
-            children: [
-              Padding(
-                padding: const EdgeInsets.all(16),
-                child: Row(
-                  mainAxisAlignment: MainAxisAlignment.spaceBetween,
-                  children: [
-                    Text(
-                      title,
-                      style: const TextStyle(fontSize: 18, fontWeight: FontWeight.bold),
-                    ),
-                    Container(
-                      padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 4),
-                      decoration: BoxDecoration(
-                        color: Colors.grey.shade200,
-                        borderRadius: BorderRadius.circular(12),
-                      ),
-                      child: Text("${tasks.length}", style: const TextStyle(fontWeight: FontWeight.bold, color: Colors.grey)),
-                    )
-                  ],
-                ),
-              ),
-              ...tasks.map((task) => Draggable<Task>(
-                data: task,
-                feedback: Material(
-                  elevation: 8,
-                  borderRadius: BorderRadius.circular(16),
-                  color: Colors.transparent,
-                  child: SizedBox(
-                    width: expanded ? (MediaQuery.of(context).size.width / 3) - 30 : 320,
-                    child: _buildTaskTile(task, isWide: false),
-                  ),
-                ),
-                childWhenDragging: Opacity(
-                  opacity: 0.3,
-                  child: _buildTaskTile(task, isWide: false),
-                ),
-                child: _buildTaskTile(task, isWide: false),
-              )),
-              const SizedBox(height: 100), // padding for empty state drag target
-            ],
-          ),
-        );
-      },
+      ),
     );
   }
+
 
   Widget _buildCalendarView(List<Task> active, List<Task> completed) {
     final allTasks = [...active, ...completed];

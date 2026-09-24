@@ -3,18 +3,31 @@ import 'package:flutter/material.dart';
 
 class PremiumTopBar extends StatelessWidget implements PreferredSizeWidget {
   final String title;
-  final VoidCallback onCalendarPressed;
+  final String userName;
   final VoidCallback onSearchPressed;
+  final VoidCallback onSyncPressed;
 
   const PremiumTopBar({
     super.key,
     required this.title,
-    required this.onCalendarPressed,
+    required this.userName,
     required this.onSearchPressed,
+    required this.onSyncPressed,
   });
 
   @override
   Widget build(BuildContext context) {
+    String getGreeting() {
+      var hour = DateTime.now().hour;
+      if (hour < 12) {
+        return 'Good morning';
+      } else if (hour < 17) {
+        return 'Good afternoon';
+      } else {
+        return 'Good evening';
+      }
+    }
+
     return ClipRRect(
       child: BackdropFilter(
         filter: ImageFilter.blur(sigmaX: 15, sigmaY: 15),
@@ -27,29 +40,35 @@ class PremiumTopBar extends StatelessWidget implements PreferredSizeWidget {
               child: Row(
                 mainAxisAlignment: MainAxisAlignment.spaceBetween,
                 children: [
-                  Column(
-                    crossAxisAlignment: CrossAxisAlignment.start,
-                    mainAxisSize: MainAxisSize.min,
-                    children: [
-                      Text(
-                        "Good day,",
-                        style: TextStyle(
-                          fontSize: 14,
-                          fontWeight: FontWeight.w600,
-                          color: Colors.grey.shade600,
+                  Expanded(
+                    child: Column(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      mainAxisSize: MainAxisSize.min,
+                      children: [
+                        Text(
+                          "${getGreeting()}, $userName",
+                          maxLines: 1,
+                          overflow: TextOverflow.ellipsis,
+                          style: TextStyle(
+                            fontSize: 14,
+                            fontWeight: FontWeight.w600,
+                            color: Colors.grey.shade600,
+                          ),
                         ),
-                      ),
-                      const SizedBox(height: 2),
-                      Text(
-                        title,
-                        style: const TextStyle(
-                          fontSize: 28,
-                          fontWeight: FontWeight.w800,
-                          color: Colors.black87,
-                          letterSpacing: -0.5,
+                        const SizedBox(height: 2),
+                        Text(
+                          title,
+                          maxLines: 1,
+                          overflow: TextOverflow.ellipsis,
+                          style: const TextStyle(
+                            fontSize: 28,
+                            fontWeight: FontWeight.w800,
+                            color: Colors.black87,
+                            letterSpacing: -0.5,
+                          ),
                         ),
-                      ),
-                    ],
+                      ],
+                    ),
                   ),
                   Row(
                     mainAxisSize: MainAxisSize.min,
@@ -86,9 +105,9 @@ class PremiumTopBar extends StatelessWidget implements PreferredSizeWidget {
                           ],
                         ),
                         child: IconButton(
-                          onPressed: onCalendarPressed,
-                          icon: const Icon(Icons.auto_awesome_mosaic_rounded, color: Colors.blueAccent),
-                          tooltip: "AI Calendar",
+                          onPressed: onSyncPressed,
+                          icon: const Icon(Icons.calendar_month_rounded, color: Colors.blueAccent),
+                          tooltip: "Sync with Device Calendar",
                         ),
                       ),
                     ],

@@ -1,3 +1,5 @@
+import 'dart:typed_data';
+import 'package:alarm/alarm.dart';
 import 'package:flutter_local_notifications/flutter_local_notifications.dart';
 import 'package:timezone/data/latest.dart' as tz;
 import 'package:timezone/timezone.dart' as tz;
@@ -13,18 +15,26 @@ class NotificationService {
   Future<void> init() async {
     tz.initializeTimeZones();
 
-    const AndroidInitializationSettings androidSettings = AndroidInitializationSettings('@mipmap/ic_launcher');
+    const AndroidInitializationSettings androidSettings = AndroidInitializationSettings('ic_notification');
     const DarwinInitializationSettings iosSettings = DarwinInitializationSettings(
       requestAlertPermission: true,
       requestBadgePermission: true,
       requestSoundPermission: true,
     );
+    const LinuxInitializationSettings linuxSettings = LinuxInitializationSettings(
+      defaultActionName: 'Open notification',
+    );
     const InitializationSettings initSettings = InitializationSettings(
       android: androidSettings, 
-      iOS: iosSettings
+      iOS: iosSettings,
+      linux: linuxSettings,
     );
 
     await _notificationsPlugin.initialize(settings: initSettings);
+
+    await _notificationsPlugin
+        .resolvePlatformSpecificImplementation<AndroidFlutterLocalNotificationsPlugin>()
+        ?.requestNotificationsPermission();
   }
 
   Future<void> scheduleTaskReminder(Task task) async {
@@ -34,34 +44,26 @@ class NotificationService {
 
     if (scheduledDate.isBefore(DateTime.now())) return;
 
-    final tz.TZDateTime tzScheduledDate = tz.TZDateTime.from(scheduledDate, tz.local);
-
-    const AndroidNotificationDetails androidDetails = AndroidNotificationDetails(
-      'task_reminders',
-      'Task Reminders',
-      channelDescription: 'Notifications for upcoming tasks',
-      importance: Importance.max,
-      priority: Priority.high,
+    final alarmSettings = AlarmSettings(
+      id: task.id.hashCode.abs(), // IDs must be positive integers
+      dateTime: scheduledDate,
+      assetAudioPath: 'assets/alarm.mp3',
+      loopAudio: true,
+      vibrate: true,
+      volumeSettings: const VolumeSettings.fixed(volume: 0.8),
+      notificationSettings: NotificationSettings(
+        title: 'Upcoming Task: ${task.title}',
+        body: task.reminderMinutes > 0 
+            ? 'Due in ${task.reminderMinutes} minutes!' 
+            : 'Due now!',
+        stopButton: 'Stop',
+      ),
     );
 
-    const NotificationDetails platformDetails = NotificationDetails(
-      android: androidDetails,
-      iOS: DarwinNotificationDetails(),
-    );
-
-    await _notificationsPlugin.zonedSchedule(
-      id: task.id.hashCode,
-      title: 'Upcoming Task: ${task.title}',
-      body: task.reminderMinutes > 0 
-          ? 'Due in ${task.reminderMinutes} minutes!' 
-          : 'Due now!',
-      scheduledDate: tzScheduledDate,
-      notificationDetails: platformDetails,
-      androidScheduleMode: AndroidScheduleMode.exactAllowWhileIdle,
-    );
+    await Alarm.set(alarmSettings: alarmSettings);
   }
 
   Future<void> cancelReminder(String taskId) async {
-    await _notificationsPlugin.cancel(id: taskId.hashCode);
+    await Alarm.stop(taskId.hashCode.abs());
   }
 }

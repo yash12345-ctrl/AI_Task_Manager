@@ -8,13 +8,28 @@ import 'package:flutter_dotenv/flutter_dotenv.dart';
  
 
 
+import 'package:alarm/alarm.dart';
+import 'package:alarm/alarm.dart';
 import 'scheduling/notification_service.dart';
+import 'alarm_screen.dart';
+import 'services/api/groq_api_manager.dart';
+
+final GlobalKey<NavigatorState> navigatorKey = GlobalKey<NavigatorState>();
 
 void main() async {
   WidgetsFlutterBinding.ensureInitialized();
   await dotenv.load(fileName: ".env");
+  GroqApiManager().initialize();
   await NotificationService().init();
+  await Alarm.init();
 
+  Alarm.ringStream.stream.listen((alarmSettings) {
+    navigatorKey.currentState?.push(
+      MaterialPageRoute(
+        builder: (context) => AlarmScreen(alarmSettings: alarmSettings),
+      ),
+    );
+  });
 
   runApp(const TaskManagerApp());
 }
@@ -25,6 +40,7 @@ class TaskManagerApp extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     return MaterialApp(
+      navigatorKey: navigatorKey,
       debugShowCheckedModeBanner: false,
       title: 'Task Manager',
       theme: ThemeData(primarySwatch: Colors.blue),
@@ -71,18 +87,31 @@ class _FrontPageState extends State<FrontPage> {
       body: Stack(
         fit: StackFit.expand,
         children: [
-          
-          if (_isVideoReady)
-            FittedBox(
-              fit: BoxFit.cover,
-              child: SizedBox(
-                width: _videoController.value.size.width,
-                height: _videoController.value.size.height,
-                child: VideoPlayer(_videoController),
+          // Instant beautiful background while video loads
+          Container(
+            decoration: const BoxDecoration(
+              gradient: LinearGradient(
+                colors: [Color(0xFF2E3192), Color(0xFF1BFFFF)],
+                begin: Alignment.topLeft,
+                end: Alignment.bottomRight,
               ),
-            )
-          else
-            Container(color: Colors.black),
+            ),
+          ),
+          
+          AnimatedOpacity(
+            opacity: _isVideoReady ? 1.0 : 0.0,
+            duration: const Duration(milliseconds: 500),
+            child: _isVideoReady
+                ? FittedBox(
+                    fit: BoxFit.cover,
+                    child: SizedBox(
+                      width: _videoController.value.size.width,
+                      height: _videoController.value.size.height,
+                      child: VideoPlayer(_videoController),
+                    ),
+                  )
+                : const SizedBox(),
+          ),
 
           
           BackdropFilter(

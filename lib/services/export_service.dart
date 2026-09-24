@@ -2,7 +2,9 @@ import 'dart:convert';
 import 'dart:io';
 import 'package:csv/csv.dart';
 import 'package:path_provider/path_provider.dart';
-import 'package:share_plus/share_plus.dart';
+import 'package:open_filex/open_filex.dart';
+import 'package:pdf/pdf.dart';
+import 'package:pdf/widgets.dart' as pw;
 import '../models/task_model.dart';
 
 class ExportService {
@@ -14,7 +16,7 @@ class ExportService {
     final file = File('${directory.path}/tasks_export.json');
     await file.writeAsString(jsonString);
 
-    await Share.shareXFiles([XFile(file.path)], subject: 'My Tasks Export (JSON)');
+    await OpenFilex.open(file.path);
   }
 
   static Future<void> exportToCsv(List<Task> tasks) async {
@@ -45,6 +47,38 @@ class ExportService {
     final file = File('${directory.path}/tasks_export.csv');
     await file.writeAsString(csv);
 
-    await Share.shareXFiles([XFile(file.path)], subject: 'My Tasks Export (CSV)');
+    await OpenFilex.open(file.path);
+  }
+
+  static Future<void> exportToPdf(List<Task> tasks) async {
+    final pdf = pw.Document();
+
+    pdf.addPage(
+      pw.MultiPage(
+        pageFormat: PdfPageFormat.a4,
+        build: (pw.Context context) {
+          return [
+            pw.Header(level: 0, child: pw.Text("Task Export")),
+            pw.TableHelper.fromTextArray(
+              context: context,
+              data: <List<String>>[
+                <String>['Title', 'Due Date', 'Priority', 'Status'],
+              ]..addAll(tasks.map((t) => [
+                t.title,
+                t.dueDate.toIso8601String().split('T')[0],
+                t.priority,
+                t.isCompleted ? 'Done' : 'Active'
+              ])),
+            ),
+          ];
+        },
+      ),
+    );
+
+    final directory = await getTemporaryDirectory();
+    final file = File('${directory.path}/tasks_export.pdf');
+    await file.writeAsBytes(await pdf.save());
+
+    await OpenFilex.open(file.path);
   }
 }

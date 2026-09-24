@@ -7,7 +7,7 @@ import 'package:flutter_markdown/flutter_markdown.dart';
 import 'package:flutter_dotenv/flutter_dotenv.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 import '../task.dart';
-
+import '../services/api/groq_api_manager.dart';
 class TaskAnalysisPage extends StatefulWidget {
   final Task task;
   const TaskAnalysisPage({super.key, required this.task});
@@ -56,35 +56,27 @@ class _TaskAnalysisPageState extends State<TaskAnalysisPage> {
         "- Category: ${task.category}\n";
 
     try {
-      final res = await http.post(
-        Uri.parse(
-          "https://api.groq.com/openai/v1/chat/completions",
-        ),
-        headers: {
-          "Authorization": "Bearer ${dotenv.env['GROQ_API_KEY']}",
-          "Content-Type": "application/json"
-        },
-        body: jsonEncode({
-          "model": "openai/gpt-oss-20b",
-          "messages": [
-            {"role": "user", "content": intro}
-          ]
-        }),
-      );
+      final text = await GroqApiManager().generateAIResponse(intro);
 
-      if (res.statusCode == 200) {
-        final data = jsonDecode(res.body);
-
-        final text = data['choices']?[0]?['message']?['content'] ?? "No plan generated.";
-        await prefs.setString(cacheKey, text.toString().trim());
-
-        setState(() {
-          _planText = text.toString().trim();
-        });
+      if (text != null && text.isNotEmpty) {
+        if (text == "LIMIT_REACHED" || text == "ALL_KEYS_EXHAUSTED") {
+          setState(() {
+            _planText = "🧠 AI Limit Reached for today. Don't worry, you can still manage your tasks manually!";
+          });
+        } else if (text.startsWith("⚠️")) {
+          setState(() {
+            _planText = text;
+          });
+        } else {
+          final trimmedText = text.toString().trim();
+          await prefs.setString(cacheKey, trimmedText);
+          setState(() {
+            _planText = trimmedText;
+          });
+        }
       } else {
         setState(() {
-          _planText =
-              "⚠️ Failed to generate plan. (${res.statusCode})";
+          _planText = "⚠️ Failed to generate plan.";
         });
       }
     } catch (e) {
